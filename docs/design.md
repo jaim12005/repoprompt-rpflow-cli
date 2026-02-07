@@ -10,7 +10,7 @@
 
 - `rpflow.rpcli`: subprocess wrapper around `rp-cli`
 - `rpflow.state`: persistent last-good routing state
-- `rpflow.cli`: argparse command surface
+- `rpflow.cli`: argparse command surface (exec/call/export/plan-export/tools-schema/smoke)
 
 ## Routing policy
 
@@ -31,8 +31,10 @@ Workspace switch:
 ## Timeout policy
 
 - `exec`: hard timeout
+- `call`: hard timeout
 - `plan-export`: hard timeout on builder chain
 - optional fallback: export selection-only prompt when builder times out
+- timeout returns code `124` (not an uncaught exception)
 
 ## Safety
 

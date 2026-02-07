@@ -9,7 +9,10 @@ Deterministic orchestration CLI for Repo Prompt (`rp-cli`) automation.
 - stateful defaults (last good window/tab/workspace)
 - timeout-aware execution
 - robust prompt export and plan-export flows
+- direct tool-call orchestration (`-c`/`-j`, including `@file` and `@-`)
 - machine-readable tools schema passthrough
+- smoke tests for end-to-end health
+- optional strict mode for deterministic CI-like runs
 
 ## Why this exists
 
@@ -48,6 +51,8 @@ pip install -e .
 
 ```bash
 python3 -m rpflow --help
+# or
+python3 -m rpflow.cli --help
 ```
 
 ## Prerequisites
@@ -84,6 +89,15 @@ rpflow plan-export \
 
 # Tools schema passthrough
 rpflow tools-schema
+
+# Direct tool call (JSON inline / @file / @-)
+rpflow call --workspace GitHub --tab T1 --tool apply_edits --json-arg @examples/edits.json
+
+# Fast smoke run
+rpflow smoke --workspace GitHub --tab T1
+
+# Deterministic strict mode (requires explicit routing)
+rpflow exec --strict --window 1 --tab T1 --workspace GitHub -e 'tabs'
 ```
 
 ## Command reference
@@ -101,6 +115,7 @@ Options:
 - `--timeout <seconds>` (default: 60)
 - `-e '<command>'` (required)
 - `--raw-json` (forward raw-json output)
+- `--strict` (requires explicit `--window --tab --workspace`)
 
 ### `rpflow export`
 Selection + prompt export helper.
@@ -120,11 +135,30 @@ Options:
 - `--timeout <seconds>` (default: 120)
 - `--fallback-export-on-timeout` (optional)
 
+### `rpflow call`
+Run `rp-cli -c/-j` calls with safe routing and workspace handling.
+
+Options:
+- `--tool <name>` (required)
+- `--json-arg <value>` (optional; inline JSON, `@file`, or `@-`)
+- routing/workspace options same as `exec`
+- `--strict` available
+
 ### `rpflow tools-schema`
 Pass-through for Repo Prompt machine-readable schema.
 
 Options:
 - `--group <name>` (optional)
+
+### `rpflow smoke`
+Run quick end-to-end health checks:
+- tabs
+- context summary
+- tools schema
+
+Options:
+- routing/workspace options same as `exec`
+- `--strict` available
 
 ## State file
 

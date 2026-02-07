@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Compile check
+        run: |
+          python -m py_compile src/rpflow/*.py
+
+      - name: CLI help smoke
+        run: |
+          rpflow --help
+          rpflow doctor --help
+          rpflow exec --help
+          rpflow call --help
+          rpflow export --help
+          rpflow plan-export --help
+          rpflow tools-schema --help
+          rpflow smoke --help

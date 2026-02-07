@@ -63,6 +63,24 @@ class RPCLI:
         args += ["-e", command]
         return self.run(args, timeout=timeout)
 
+    def run_call(
+        self,
+        tool: str,
+        json_arg: str = "",
+        window: Optional[int] = None,
+        tab: Optional[str] = None,
+        timeout: int = 60,
+    ) -> RunResult:
+        args: List[str] = []
+        if window is not None:
+            args += ["-w", str(window)]
+        if tab:
+            args += ["-t", tab]
+        args += ["-c", tool]
+        if json_arg:
+            args += ["-j", json_arg]
+        return self.run(args, timeout=timeout)
+
     def list_windows(self, timeout: int = 30) -> List[Dict[str, Any]]:
         res = self.run(["--raw-json", "-e", "windows"], timeout=timeout)
         if res.code != 0:
