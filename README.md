@@ -7,7 +7,7 @@ Deterministic orchestration CLI for Repo Prompt (`rp-cli`) automation.
 - window + tab routing
 - safe workspace switching (`Already on workspace` treated as success)
 - stateful defaults (last good window/tab/workspace)
-- timeout-aware execution
+- profile-driven timeout-aware execution (`--profile fast|normal|deep`)
 - robust prompt export and plan-export flows
 - direct tool-call orchestration (`-c`/`-j`, including `@file` and `@-`)
 - machine-readable tools schema passthrough
@@ -15,6 +15,7 @@ Deterministic orchestration CLI for Repo Prompt (`rp-cli`) automation.
 - optional strict mode for deterministic CI-like runs
 - structured JSON run reports per command (`--report-json`)
 - clearer timeout/stall classification (builder timeout vs generic timeout vs killed)
+- optional single retry on builder timeout/SIGKILL (`--retry-on-timeout`)
 - optional resume path from an existing export (`--resume-from-export`)
 
 ## Why this exists
@@ -35,8 +36,12 @@ Repo Prompt is powerful, but automation can get brittle when window routing, wor
   - `export`: selection → prompt export
   - `plan-export`: selection → context builder (plan) → prompt export
   - `autopilot`: preflight smoke + plan-export in one command
+- Timeout profiles
+  - `--profile fast|normal|deep` with sensible per-command defaults
 - Timeout + fallback path
   - optional fallback export when builder times out
+  - optional one-shot retry on timeout/SIGKILL before fallback
+  - optional resume from an existing export if plan/fallback still fails
 - Persistent state
   - `~/.config/rpflow/state.json`
 
@@ -88,8 +93,9 @@ rpflow plan-export \
   --select-set nvidia-dgx-spark/scripts/ \
   --task "Draft reliability hardening plan" \
   --out /tmp/plan.md \
-  --timeout 90 \
-  --fallback-export-on-timeout
+  --profile fast \
+  --fallback-export-on-timeout \
+  --retry-on-timeout
 
 # One-shot preflight + plan-export
 rpflow autopilot \
@@ -122,8 +128,9 @@ rpflow exec --strict --window 1 --tab T1 --workspace GitHub -e 'tabs'
 
 ## Command reference
 
-Common option (all subcommands):
+Common options (all subcommands):
 - `--report-json <path>` write a structured run report JSON for audit/logging
+- `--profile fast|normal|deep` choose timeout defaults (default: `normal`)
 
 ### `rpflow doctor`
 Checks connectivity and prints windows/tabs summary.
@@ -135,7 +142,7 @@ Options:
 - `--window <id>`
 - `--tab <name>` (default: `T1`)
 - `--workspace <name>` (default: `GitHub`)
-- `--timeout <seconds>` (default: 60)
+- `--timeout <seconds>` (optional; otherwise from selected profile)
 - `-e '<command>'` (required)
 - `--raw-json` (forward raw-json output)
 - `--strict` (requires explicit `--window --tab --workspace`)
@@ -155,8 +162,11 @@ Options:
 - `--select-set <paths>` (required)
 - `--task <text>` (required)
 - `--out <path>` (required)
-- `--timeout <seconds>` (default: 120)
+- `--timeout <seconds>` (optional; otherwise from selected profile)
 - `--fallback-export-on-timeout` (optional)
+- `--retry-on-timeout` (optional)
+- `--retry-timeout <seconds>` (optional)
+- `--retry-timeout-scale <float>` (optional, default 1.5)
 - `--resume-from-export <path>` (optional)
 
 ### `rpflow autopilot`
@@ -171,9 +181,12 @@ Options:
 - `--select-set <paths>` (required)
 - `--task <text>` (required)
 - `--out <path>` (required)
-- `--timeout <seconds>` (default: 120)
-- `--preflight-timeout <seconds>` (default: 45)
+- `--timeout <seconds>` (optional; otherwise from selected profile)
+- `--preflight-timeout <seconds>` (optional; otherwise from selected profile)
 - `--fallback-export-on-timeout` (optional)
+- `--retry-on-timeout` (optional)
+- `--retry-timeout <seconds>` (optional)
+- `--retry-timeout-scale <float>` (optional, default 1.5)
 - `--resume-from-export <path>` (optional)
 - routing/workspace options same as `exec`
 

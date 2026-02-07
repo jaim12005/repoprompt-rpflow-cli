@@ -31,11 +31,13 @@ Workspace switch:
 
 ## Timeout policy
 
+- profile-driven defaults (`--profile fast|normal|deep`) set baseline timeouts per command
 - `exec`: hard timeout
 - `call`: hard timeout
 - `plan-export`: hard timeout on builder chain
 - `autopilot`: preflight timeout + plan/export timeout
-- optional fallback: export selection-only prompt when builder times out
+- optional retry: one builder re-run on timeout/SIGKILL (`--retry-on-timeout`)
+- optional fallback: export selection-only prompt when builder times out or gets SIGKILL
 - optional resume path: reuse a prior known-good export (`--resume-from-export`)
 - timeout returns code `124` (not an uncaught exception)
 - stage classification distinguishes `builder_timeout` vs generic `timeout` vs signal kill
