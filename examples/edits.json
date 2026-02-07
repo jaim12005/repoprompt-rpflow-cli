@@ -1,0 +1,6 @@
+{
+  "path": "src/example.ts",
+  "search": "oldValue",
+  "replace": "newValue",
+  "all": true
+}
