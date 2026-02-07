@@ -69,6 +69,11 @@ python3 -m rpflow.cli --help
 - Repo Prompt app running
 - Repo Prompt MCP server enabled
 - `rp-cli` on PATH
+- Python 3.9+
+
+Tested baseline:
+- OpenClaw 2026.2.x
+- Repo Prompt app + MCP enabled on macOS
 
 ## Quick start
 
@@ -124,6 +129,24 @@ rpflow plan-export --workspace GitHub --tab T1 --select-set repoprompt-rpflow-cl
 
 # Deterministic strict mode (requires explicit routing)
 rpflow exec --strict --window 1 --tab T1 --workspace GitHub -e 'tabs'
+```
+
+## 2-minute quickstart (community)
+
+```bash
+# 1) Clone + install
+cd /Users/<you>/github
+git clone <your-private-or-public-rpflow-repo-url> repoprompt-rpflow-cli
+cd repoprompt-rpflow-cli
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+
+# 2) Verify Repo Prompt wiring
+rpflow smoke --workspace GitHub --tab T1 --profile fast
+# expected lines: tabs: ok / context: ok / tools-schema: ok
+
+# 3) Run one end-to-end plan/export
+rpflow autopilot --workspace GitHub --tab T1 --select-set <repo-or-path> --task "draft plan" --out /tmp/rpflow-plan.md --retry-on-timeout --fallback-export-on-timeout
+# expected: preflight:*: ok and Prompt Export to /tmp/rpflow-plan.md
 ```
 
 ## Command reference
@@ -214,6 +237,23 @@ Run quick end-to-end health checks:
 Options:
 - routing/workspace options same as `exec`
 - `--strict` available
+
+## Troubleshooting
+
+- `rpflow error: rp-cli not found in PATH`
+  - Install rp-cli from Repo Prompt settings (MCP Server page).
+- `tab '<name>' not found`
+  - Run `rpflow exec -e 'tabs'` and use a valid tab name.
+- `multiple windows detected`
+  - Pass `--window <id>` or close extra Repo Prompt windows.
+- Builder timeout / SIGKILL
+  - Use `--retry-on-timeout --fallback-export-on-timeout`, optionally `--resume-from-export`.
+
+## Security and privacy
+
+- `rpflow` does not store API keys or secrets.
+- `--report-json` files can contain command/output tails; treat them as local diagnostics.
+- Keep runtime state local where appropriate; commit docs/config, not volatile state snapshots.
 
 ## State file
 
