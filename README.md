@@ -31,6 +31,7 @@ Repo Prompt is powerful, but automation can get brittle when window routing, wor
 - Export helpers
   - `export`: selection → prompt export
   - `plan-export`: selection → context builder (plan) → prompt export
+  - `autopilot`: preflight smoke + plan-export in one command
 - Timeout + fallback path
   - optional fallback export when builder times out
 - Persistent state
@@ -87,6 +88,16 @@ rpflow plan-export \
   --timeout 90 \
   --fallback-export-on-timeout
 
+# One-shot preflight + plan-export
+rpflow autopilot \
+  --workspace GitHub \
+  --tab T1 \
+  --select-set nvidia-dgx-spark/scripts/ \
+  --task "Draft reliability hardening plan" \
+  --out /tmp/plan.md \
+  --timeout 90 \
+  --fallback-export-on-timeout
+
 # Tools schema passthrough
 rpflow tools-schema
 
@@ -134,6 +145,23 @@ Options:
 - `--out <path>` (required)
 - `--timeout <seconds>` (default: 120)
 - `--fallback-export-on-timeout` (optional)
+
+### `rpflow autopilot`
+One-shot `preflight + plan-export` orchestration.
+
+Behavior:
+- runs smoke-style preflight checks (tabs/context/tools-schema)
+- then runs plan-export flow
+- optional fallback export on timeout
+
+Options:
+- `--select-set <paths>` (required)
+- `--task <text>` (required)
+- `--out <path>` (required)
+- `--timeout <seconds>` (default: 120)
+- `--preflight-timeout <seconds>` (default: 45)
+- `--fallback-export-on-timeout` (optional)
+- routing/workspace options same as `exec`
 
 ### `rpflow call`
 Run `rp-cli -c/-j` calls with safe routing and workspace handling.

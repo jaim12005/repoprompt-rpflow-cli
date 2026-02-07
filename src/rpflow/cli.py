@@ -75,6 +75,24 @@ def _maybe_save_state(ok: bool, window: int, tab: str, workspace: str) -> None:
         save_state(RPState(window, tab, workspace))
 
 
+def _run_smoke_checks(rp: RPCLI, window: int, tab: str, timeout: int):
+    checks = []
+    tabs = rp.run_exec("tabs", window=window, tab=tab, timeout=timeout)
+    checks.append(("tabs", tabs.code == 0, tabs))
+
+    context = rp.run_exec(
+        "context --include tokens,selection,prompt --path-display relative",
+        window=window,
+        tab=tab,
+        timeout=timeout,
+    )
+    checks.append(("context", context.code == 0, context))
+
+    schema = rp.run(["--tools-schema"], timeout=timeout)
+    checks.append(("tools-schema", schema.code == 0, schema))
+    return checks
+
+
 def cmd_doctor(args) -> int:
     rp = RPCLI()
     state = load_state()
@@ -199,21 +217,7 @@ def cmd_smoke(args) -> int:
 
     rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
 
-    checks = []
-    tabs = rp.run_exec("tabs", window=window, tab=tab, timeout=args.timeout)
-    checks.append(("tabs", tabs.code == 0, tabs))
-
-    context = rp.run_exec(
-        "context --include tokens,selection,prompt --path-display relative",
-        window=window,
-        tab=tab,
-        timeout=args.timeout,
-    )
-    checks.append(("context", context.code == 0, context))
-
-    schema = rp.run(["--tools-schema"], timeout=args.timeout)
-    checks.append(("tools-schema", schema.code == 0, schema))
-
+    checks = _run_smoke_checks(rp, window, tab, args.timeout)
     failed = [name for name, ok, _ in checks if not ok]
     for name, ok, _ in checks:
         print(f"{name}: {'ok' if ok else 'fail'}")
@@ -227,6 +231,44 @@ def cmd_smoke(args) -> int:
 
     _maybe_save_state(True, window, tab, workspace)
     return 0
+
+
+def cmd_autopilot(args) -> int:
+    rp = RPCLI()
+    state = load_state()
+    window, tab, workspace = _prepare_routing(args, rp, state)
+
+    rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+
+    checks = _run_smoke_checks(rp, window, tab, args.preflight_timeout)
+    failed = [name for name, ok, _ in checks if not ok]
+    for name, ok, _ in checks:
+        print(f"preflight:{name}: {'ok' if ok else 'fail'}")
+
+    if failed:
+        for name, ok, res in checks:
+            if not ok:
+                print(f"\n--- preflight {name} output ---", file=sys.stderr)
+                _print_out(res)
+        return 1
+
+    out = Path(args.out)
+    if out.exists():
+        out.unlink()
+
+    cmd = _build_plan_export_cmd(_split_paths(args.select_set), args.task, str(out))
+    res = rp.run_exec(cmd, window=window, tab=tab, timeout=args.timeout)
+
+    if res.code == 124 and args.fallback_export_on_timeout:
+        fallback = _build_selection_export_cmd(_split_paths(args.select_set), str(out))
+        fb = rp.run_exec(fallback, window=window, tab=tab, timeout=args.timeout)
+        _print_out(fb)
+        _maybe_save_state(fb.code == 0, window, tab, workspace)
+        return fb.code
+
+    _print_out(res)
+    _maybe_save_state(res.code == 0, window, tab, workspace)
+    return res.code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -287,6 +329,19 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--fallback-export-on-timeout", action="store_true")
     pp.add_argument("--strict", action="store_true", help="require explicit --window/--tab/--workspace")
     pp.set_defaults(func=cmd_plan_export)
+
+    pa = sub.add_parser("autopilot", help="preflight + plan-export in one command")
+    pa.add_argument("--select-set", required=True)
+    pa.add_argument("--task", required=True)
+    pa.add_argument("--out", required=True)
+    pa.add_argument("--window", type=int)
+    pa.add_argument("--tab")
+    pa.add_argument("--workspace")
+    pa.add_argument("--timeout", type=int, default=120, help="plan/export timeout")
+    pa.add_argument("--preflight-timeout", type=int, default=45)
+    pa.add_argument("--fallback-export-on-timeout", action="store_true")
+    pa.add_argument("--strict", action="store_true", help="require explicit --window/--tab/--workspace")
+    pa.set_defaults(func=cmd_autopilot)
 
     pm = sub.add_parser("smoke", help="run quick end-to-end health checks")
     pm.add_argument("--window", type=int)
