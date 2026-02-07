@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 from . import __version__
-from .rpcli import RPCLI, RPFlowError, ensure_tab_exists, resolve_window
+from .rpcli import RPCLI, RPFlowError, RunResult, ensure_tab_exists, resolve_window
 from .state import RPState, load_state, save_state
 
 
@@ -36,11 +39,127 @@ def _build_plan_export_cmd(paths: List[str], task: str, out: str) -> str:
     return " && ".join(chain)
 
 
-def _print_out(res):
+def _print_out(res: RunResult):
     if res.stdout:
         print(res.stdout, end="")
     if res.stderr:
         print(res.stderr, file=sys.stderr, end="")
+
+
+def _tail(text: str, limit: int = 600) -> str:
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _stage_classification(res: RunResult, builder_related: bool = False) -> str:
+    if res.code == 0:
+        if res.classification == "already_on_workspace":
+            return "workspace_already_selected"
+        return "ok"
+    if res.timed_out:
+        return "builder_timeout" if builder_related else "timeout"
+    if res.signal is not None:
+        if res.signal == 9:
+            return "killed_sigkill"
+        return f"killed_sig{res.signal}"
+    return res.classification or "error"
+
+
+def _emit_failure_hint(stage: str, res: RunResult, builder_related: bool = False) -> None:
+    if res.code == 0:
+        return
+    cls = _stage_classification(res, builder_related=builder_related)
+    print(f"rpflow stage {stage}: {cls} (code={res.code})", file=sys.stderr)
+
+
+def _start_report(command: str) -> Dict[str, Any]:
+    return {
+        "report_version": 1,
+        "command": command,
+        "started_at": _now_iso_utc(),
+        "stages": [],
+        "_t0": time.time(),
+    }
+
+
+def _add_stage(
+    report: Dict[str, Any],
+    name: str,
+    res: RunResult,
+    *,
+    builder_related: bool = False,
+    extra: Dict[str, Any] | None = None,
+) -> None:
+    stage = {
+        "name": name,
+        "classification": _stage_classification(res, builder_related=builder_related),
+        "code": res.code,
+        "timed_out": bool(res.timed_out),
+        "signal": res.signal,
+        "stdout_chars": len(res.stdout or ""),
+        "stderr_chars": len(res.stderr or ""),
+        "stdout_tail": _tail(res.stdout or ""),
+        "stderr_tail": _tail(res.stderr or ""),
+    }
+    if extra:
+        stage.update(extra)
+    report["stages"].append(stage)
+
+
+def _write_report(
+    args,
+    report: Dict[str, Any],
+    *,
+    exit_code: int,
+    routing: Dict[str, Any] | None = None,
+    extra: Dict[str, Any] | None = None,
+) -> None:
+    path = getattr(args, "report_json", "")
+    if not path:
+        return
+
+    payload = dict(report)
+    t0 = float(payload.pop("_t0", time.time()))
+    payload["finished_at"] = _now_iso_utc()
+    payload["duration_ms"] = int((time.time() - t0) * 1000)
+    payload["exit_code"] = int(exit_code)
+    payload["ok"] = bool(exit_code == 0)
+    if routing:
+        payload["routing"] = routing
+    if extra:
+        payload.update(extra)
+
+    out = Path(path).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_exception_report(args, command: str, err: Exception) -> None:
+    path = getattr(args, "report_json", "")
+    if not path:
+        return
+    payload = {
+        "report_version": 1,
+        "command": command,
+        "started_at": _now_iso_utc(),
+        "finished_at": _now_iso_utc(),
+        "duration_ms": 0,
+        "exit_code": 2,
+        "ok": False,
+        "error": str(err),
+        "classification": "rpflow_error",
+        "stages": [],
+    }
+    out = Path(path).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def _prepare_routing(args, rp: RPCLI, state: RPState):
@@ -93,7 +212,42 @@ def _run_smoke_checks(rp: RPCLI, window: int, tab: str, timeout: int):
     return checks
 
 
+def _attempt_resume_from_export(
+    resume_path_raw: str,
+    out_path: Path,
+    report: Dict[str, Any],
+    reason: str,
+) -> bool:
+    if not resume_path_raw:
+        return False
+
+    resume_path = Path(resume_path_raw).expanduser()
+    if not resume_path.exists() or not resume_path.is_file():
+        report["resume"] = {
+            "attempted": True,
+            "used": False,
+            "reason": reason,
+            "source": str(resume_path),
+            "source_exists": False,
+        }
+        return False
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(resume_path, out_path)
+    report["resume"] = {
+        "attempted": True,
+        "used": True,
+        "reason": reason,
+        "source": str(resume_path),
+        "destination": str(out_path),
+        "bytes": out_path.stat().st_size,
+    }
+    print(f"rpflow resume: reused export from {resume_path}", file=sys.stderr)
+    return True
+
+
 def cmd_doctor(args) -> int:
+    report = _start_report("doctor")
     rp = RPCLI()
     state = load_state()
 
@@ -114,21 +268,35 @@ def cmd_doctor(args) -> int:
         print(f"tabs_in_window_{window}: {', '.join([t.get('name','?') for t in tabs])}")
 
     schema = rp.run(["--tools-schema"], timeout=args.timeout)
+    _add_stage(report, "tools-schema", schema)
     if schema.code == 0:
         print("tools_schema: ok")
     else:
         print("tools_schema: failed")
+        _emit_failure_hint("tools-schema", schema)
         _print_out(schema)
 
+    _write_report(
+        args,
+        report,
+        exit_code=0,
+        extra={
+            "windows_count": len(windows),
+            "selected_window": window,
+        },
+    )
     return 0
 
 
 def cmd_exec(args) -> int:
+    report = _start_report("exec")
     rp = RPCLI()
     state = load_state()
     window, tab, workspace = _prepare_routing(args, rp, state)
 
-    rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    ws = rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    _add_stage(report, "workspace_switch", ws)
+
     res = rp.run_exec(
         args.command,
         window=window,
@@ -136,17 +304,31 @@ def cmd_exec(args) -> int:
         timeout=args.timeout,
         raw_json=args.raw_json,
     )
+    _add_stage(report, "exec", res, builder_related=("builder " in args.command))
+    if res.code != 0:
+        _emit_failure_hint("exec", res, builder_related=("builder " in args.command))
+
     _print_out(res)
     _maybe_save_state(res.code == 0, window, tab, workspace)
+    _write_report(
+        args,
+        report,
+        exit_code=res.code,
+        routing={"window": window, "tab": tab, "workspace": workspace},
+        extra={"command_text": args.command},
+    )
     return res.code
 
 
 def cmd_call(args) -> int:
+    report = _start_report("call")
     rp = RPCLI()
     state = load_state()
     window, tab, workspace = _prepare_routing(args, rp, state)
 
-    rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    ws = rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    _add_stage(report, "workspace_switch", ws)
+
     res = rp.run_call(
         args.tool,
         json_arg=args.json_arg,
@@ -154,136 +336,313 @@ def cmd_call(args) -> int:
         tab=tab,
         timeout=args.timeout,
     )
+    _add_stage(report, "call", res)
+    if res.code != 0:
+        _emit_failure_hint("call", res)
+
     _print_out(res)
     _maybe_save_state(res.code == 0, window, tab, workspace)
+    _write_report(
+        args,
+        report,
+        exit_code=res.code,
+        routing={"window": window, "tab": tab, "workspace": workspace},
+        extra={"tool": args.tool},
+    )
     return res.code
 
 
 def cmd_tools_schema(args) -> int:
+    report = _start_report("tools-schema")
     rp = RPCLI()
     if args.group:
         res = rp.run(["--tools-schema=" + args.group], timeout=args.timeout)
     else:
         res = rp.run(["--tools-schema"], timeout=args.timeout)
+    _add_stage(report, "tools-schema", res)
+    if res.code != 0:
+        _emit_failure_hint("tools-schema", res)
     _print_out(res)
+    _write_report(
+        args,
+        report,
+        exit_code=res.code,
+        extra={"group": args.group},
+    )
     return res.code
 
 
 def cmd_export(args) -> int:
+    report = _start_report("export")
     rp = RPCLI()
     state = load_state()
     window, tab, workspace = _prepare_routing(args, rp, state)
 
-    rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    ws = rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    _add_stage(report, "workspace_switch", ws)
+
     out = Path(args.out)
     if out.exists():
         out.unlink()
 
     cmd = _build_selection_export_cmd(_split_paths(args.select_set), str(out))
     res = rp.run_exec(cmd, window=window, tab=tab, timeout=args.timeout)
+    _add_stage(report, "export", res)
+    if res.code != 0:
+        _emit_failure_hint("export", res)
+
     _print_out(res)
     _maybe_save_state(res.code == 0, window, tab, workspace)
+    _write_report(
+        args,
+        report,
+        exit_code=res.code,
+        routing={"window": window, "tab": tab, "workspace": workspace},
+        extra={
+            "out_path": str(out),
+            "out_exists": out.exists(),
+            "out_bytes": out.stat().st_size if out.exists() else 0,
+        },
+    )
     return res.code
 
 
 def cmd_plan_export(args) -> int:
+    report = _start_report("plan-export")
     rp = RPCLI()
     state = load_state()
     window, tab, workspace = _prepare_routing(args, rp, state)
 
-    rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    ws = rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    _add_stage(report, "workspace_switch", ws)
+
     out = Path(args.out)
     if out.exists():
         out.unlink()
 
     cmd = _build_plan_export_cmd(_split_paths(args.select_set), args.task, str(out))
     res = rp.run_exec(cmd, window=window, tab=tab, timeout=args.timeout)
+    _add_stage(report, "plan_export", res, builder_related=True)
+
+    fallback_used = False
+    resume_used = False
+
     if res.code == 124 and args.fallback_export_on_timeout:
+        fallback_used = True
         fallback = _build_selection_export_cmd(_split_paths(args.select_set), str(out))
         fb = rp.run_exec(fallback, window=window, tab=tab, timeout=args.timeout)
-        _print_out(fb)
-        _maybe_save_state(fb.code == 0, window, tab, workspace)
-        return fb.code
+        _add_stage(report, "fallback_export", fb)
+        if fb.code != 0:
+            _emit_failure_hint("fallback_export", fb)
+            resume_used = _attempt_resume_from_export(
+                args.resume_from_export,
+                out,
+                report,
+                reason="fallback_export_failed_after_timeout",
+            )
+            code = 0 if resume_used else fb.code
+        else:
+            _print_out(fb)
+            code = fb.code
+    elif res.code != 0:
+        _emit_failure_hint("plan_export", res, builder_related=True)
+        if res.timed_out:
+            resume_used = _attempt_resume_from_export(
+                args.resume_from_export,
+                out,
+                report,
+                reason="plan_export_timeout_without_fallback",
+            )
+        else:
+            resume_used = _attempt_resume_from_export(
+                args.resume_from_export,
+                out,
+                report,
+                reason="plan_export_failed",
+            )
+        code = 0 if resume_used else res.code
+    else:
+        _print_out(res)
+        code = res.code
 
-    _print_out(res)
-    _maybe_save_state(res.code == 0, window, tab, workspace)
-    return res.code
+    _maybe_save_state(code == 0, window, tab, workspace)
+    _write_report(
+        args,
+        report,
+        exit_code=code,
+        routing={"window": window, "tab": tab, "workspace": workspace},
+        extra={
+            "fallback_used": fallback_used,
+            "resume_used": resume_used,
+            "out_path": str(out),
+            "out_exists": out.exists(),
+            "out_bytes": out.stat().st_size if out.exists() else 0,
+        },
+    )
+    return code
 
 
 def cmd_smoke(args) -> int:
+    report = _start_report("smoke")
     rp = RPCLI()
     state = load_state()
     window, tab, workspace = _prepare_routing(args, rp, state)
 
-    rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    ws = rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    _add_stage(report, "workspace_switch", ws)
 
     checks = _run_smoke_checks(rp, window, tab, args.timeout)
     failed = [name for name, ok, _ in checks if not ok]
-    for name, ok, _ in checks:
+    for name, ok, res in checks:
         print(f"{name}: {'ok' if ok else 'fail'}")
+        _add_stage(report, f"smoke_{name}", res)
 
     if failed:
         for name, ok, res in checks:
             if not ok:
                 print(f"\n--- {name} output ---", file=sys.stderr)
+                _emit_failure_hint(name, res)
                 _print_out(res)
+        _write_report(
+            args,
+            report,
+            exit_code=1,
+            routing={"window": window, "tab": tab, "workspace": workspace},
+            extra={"failed_checks": failed},
+        )
         return 1
 
     _maybe_save_state(True, window, tab, workspace)
+    _write_report(
+        args,
+        report,
+        exit_code=0,
+        routing={"window": window, "tab": tab, "workspace": workspace},
+    )
     return 0
 
 
 def cmd_autopilot(args) -> int:
+    report = _start_report("autopilot")
     rp = RPCLI()
     state = load_state()
     window, tab, workspace = _prepare_routing(args, rp, state)
 
-    rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    ws = rp.safe_workspace_switch(workspace, window, tab, timeout=args.timeout)
+    _add_stage(report, "workspace_switch", ws)
 
     checks = _run_smoke_checks(rp, window, tab, args.preflight_timeout)
     failed = [name for name, ok, _ in checks if not ok]
-    for name, ok, _ in checks:
+    for name, ok, res in checks:
         print(f"preflight:{name}: {'ok' if ok else 'fail'}")
+        _add_stage(report, f"preflight_{name}", res)
+
+    out = Path(args.out)
 
     if failed:
         for name, ok, res in checks:
             if not ok:
                 print(f"\n--- preflight {name} output ---", file=sys.stderr)
+                _emit_failure_hint(f"preflight_{name}", res)
                 _print_out(res)
-        return 1
 
-    out = Path(args.out)
+        resumed = _attempt_resume_from_export(
+            args.resume_from_export,
+            out,
+            report,
+            reason="preflight_failed",
+        )
+        code = 0 if resumed else 1
+        _write_report(
+            args,
+            report,
+            exit_code=code,
+            routing={"window": window, "tab": tab, "workspace": workspace},
+            extra={"failed_checks": failed, "resume_used": resumed},
+        )
+        return code
+
     if out.exists():
         out.unlink()
 
     cmd = _build_plan_export_cmd(_split_paths(args.select_set), args.task, str(out))
     res = rp.run_exec(cmd, window=window, tab=tab, timeout=args.timeout)
+    _add_stage(report, "autopilot_plan_export", res, builder_related=True)
+
+    fallback_used = False
+    resume_used = False
 
     if res.code == 124 and args.fallback_export_on_timeout:
+        fallback_used = True
         fallback = _build_selection_export_cmd(_split_paths(args.select_set), str(out))
         fb = rp.run_exec(fallback, window=window, tab=tab, timeout=args.timeout)
-        _print_out(fb)
-        _maybe_save_state(fb.code == 0, window, tab, workspace)
-        return fb.code
+        _add_stage(report, "fallback_export", fb)
+        if fb.code != 0:
+            _emit_failure_hint("fallback_export", fb)
+            resume_used = _attempt_resume_from_export(
+                args.resume_from_export,
+                out,
+                report,
+                reason="fallback_export_failed_after_timeout",
+            )
+            code = 0 if resume_used else fb.code
+        else:
+            _print_out(fb)
+            code = fb.code
+    elif res.code != 0:
+        _emit_failure_hint("autopilot_plan_export", res, builder_related=True)
+        if res.timed_out:
+            resume_used = _attempt_resume_from_export(
+                args.resume_from_export,
+                out,
+                report,
+                reason="autopilot_timeout_without_fallback",
+            )
+        else:
+            resume_used = _attempt_resume_from_export(
+                args.resume_from_export,
+                out,
+                report,
+                reason="autopilot_plan_failed",
+            )
+        code = 0 if resume_used else res.code
+    else:
+        _print_out(res)
+        code = res.code
 
-    _print_out(res)
-    _maybe_save_state(res.code == 0, window, tab, workspace)
-    return res.code
+    _maybe_save_state(code == 0, window, tab, workspace)
+    _write_report(
+        args,
+        report,
+        exit_code=code,
+        routing={"window": window, "tab": tab, "workspace": workspace},
+        extra={
+            "fallback_used": fallback_used,
+            "resume_used": resume_used,
+            "out_path": str(out),
+            "out_exists": out.exists(),
+            "out_bytes": out.stat().st_size if out.exists() else 0,
+        },
+    )
+    return code
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rpflow", description="Reliable Repo Prompt automation wrapper")
     p.add_argument("--version", action="version", version=f"rpflow {__version__}")
 
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--report-json", default="", help="write structured run report JSON to path")
+
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pd = sub.add_parser("doctor", help="check rp-cli connectivity and routing")
+    pd = sub.add_parser("doctor", parents=[common], help="check rp-cli connectivity and routing")
     pd.add_argument("--window", type=int)
     pd.add_argument("--timeout", type=int, default=30)
     pd.add_argument("--strict", action="store_true", help="require explicit routing args")
     pd.set_defaults(func=cmd_doctor)
 
-    pe = sub.add_parser("exec", help="run rp-cli exec command with safe routing")
+    pe = sub.add_parser("exec", parents=[common], help="run rp-cli exec command with safe routing")
     pe.add_argument("-e", "--command", required=True)
     pe.add_argument("--window", type=int)
     pe.add_argument("--tab")
@@ -293,7 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--strict", action="store_true", help="require explicit --window/--tab/--workspace")
     pe.set_defaults(func=cmd_exec)
 
-    pc = sub.add_parser("call", help="run rp-cli tool call (-c/-j) with safe routing")
+    pc = sub.add_parser("call", parents=[common], help="run rp-cli tool call (-c/-j) with safe routing")
     pc.add_argument("--tool", required=True, help="tool name for -c")
     pc.add_argument("--json-arg", default="", help="arg for -j (inline JSON, @file, or @-)")
     pc.add_argument("--window", type=int)
@@ -303,12 +662,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--strict", action="store_true", help="require explicit --window/--tab/--workspace")
     pc.set_defaults(func=cmd_call)
 
-    ps = sub.add_parser("tools-schema", help="print Repo Prompt tools schema")
+    ps = sub.add_parser("tools-schema", parents=[common], help="print Repo Prompt tools schema")
     ps.add_argument("--group", default="")
     ps.add_argument("--timeout", type=int, default=60)
     ps.set_defaults(func=cmd_tools_schema)
 
-    px = sub.add_parser("export", help="selection -> prompt export")
+    px = sub.add_parser("export", parents=[common], help="selection -> prompt export")
     px.add_argument("--select-set", required=True)
     px.add_argument("--out", required=True)
     px.add_argument("--window", type=int)
@@ -318,7 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
     px.add_argument("--strict", action="store_true", help="require explicit --window/--tab/--workspace")
     px.set_defaults(func=cmd_export)
 
-    pp = sub.add_parser("plan-export", help="selection -> builder plan -> prompt export")
+    pp = sub.add_parser("plan-export", parents=[common], help="selection -> builder plan -> prompt export")
     pp.add_argument("--select-set", required=True)
     pp.add_argument("--task", required=True)
     pp.add_argument("--out", required=True)
@@ -327,10 +686,15 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--workspace")
     pp.add_argument("--timeout", type=int, default=120)
     pp.add_argument("--fallback-export-on-timeout", action="store_true")
+    pp.add_argument(
+        "--resume-from-export",
+        default="",
+        help="optional existing export path to reuse if plan/fallback fails",
+    )
     pp.add_argument("--strict", action="store_true", help="require explicit --window/--tab/--workspace")
     pp.set_defaults(func=cmd_plan_export)
 
-    pa = sub.add_parser("autopilot", help="preflight + plan-export in one command")
+    pa = sub.add_parser("autopilot", parents=[common], help="preflight + plan-export in one command")
     pa.add_argument("--select-set", required=True)
     pa.add_argument("--task", required=True)
     pa.add_argument("--out", required=True)
@@ -340,10 +704,15 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--timeout", type=int, default=120, help="plan/export timeout")
     pa.add_argument("--preflight-timeout", type=int, default=45)
     pa.add_argument("--fallback-export-on-timeout", action="store_true")
+    pa.add_argument(
+        "--resume-from-export",
+        default="",
+        help="optional existing export path to reuse if preflight/plan/fallback fails",
+    )
     pa.add_argument("--strict", action="store_true", help="require explicit --window/--tab/--workspace")
     pa.set_defaults(func=cmd_autopilot)
 
-    pm = sub.add_parser("smoke", help="run quick end-to-end health checks")
+    pm = sub.add_parser("smoke", parents=[common], help="run quick end-to-end health checks")
     pm.add_argument("--window", type=int)
     pm.add_argument("--tab")
     pm.add_argument("--workspace")
@@ -360,6 +729,7 @@ def main(argv: List[str] | None = None) -> int:
     try:
         return int(args.func(args))
     except RPFlowError as e:
+        _write_exception_report(args, getattr(args, "cmd", "unknown"), e)
         print(f"rpflow error: {e}", file=sys.stderr)
         return 2
 

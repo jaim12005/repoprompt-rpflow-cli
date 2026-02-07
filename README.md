@@ -13,6 +13,9 @@ Deterministic orchestration CLI for Repo Prompt (`rp-cli`) automation.
 - machine-readable tools schema passthrough
 - smoke tests for end-to-end health
 - optional strict mode for deterministic CI-like runs
+- structured JSON run reports per command (`--report-json`)
+- clearer timeout/stall classification (builder timeout vs generic timeout vs killed)
+- optional resume path from an existing export (`--resume-from-export`)
 
 ## Why this exists
 
@@ -107,11 +110,20 @@ rpflow call --workspace GitHub --tab T1 --tool apply_edits --json-arg @examples/
 # Fast smoke run
 rpflow smoke --workspace GitHub --tab T1
 
+# Structured report for automation logs
+rpflow autopilot --workspace GitHub --tab T1 --select-set repoprompt-rpflow-cli/src/ --task "Draft plan" --out /tmp/plan.md --fallback-export-on-timeout --report-json /tmp/rpflow-run.json
+
+# Resume from prior export if plan path fails
+rpflow plan-export --workspace GitHub --tab T1 --select-set repoprompt-rpflow-cli/src/ --task "Draft plan" --out /tmp/plan.md --resume-from-export /tmp/last-known-good.md
+
 # Deterministic strict mode (requires explicit routing)
 rpflow exec --strict --window 1 --tab T1 --workspace GitHub -e 'tabs'
 ```
 
 ## Command reference
+
+Common option (all subcommands):
+- `--report-json <path>` write a structured run report JSON for audit/logging
 
 ### `rpflow doctor`
 Checks connectivity and prints windows/tabs summary.
@@ -145,6 +157,7 @@ Options:
 - `--out <path>` (required)
 - `--timeout <seconds>` (default: 120)
 - `--fallback-export-on-timeout` (optional)
+- `--resume-from-export <path>` (optional)
 
 ### `rpflow autopilot`
 One-shot `preflight + plan-export` orchestration.
@@ -161,6 +174,7 @@ Options:
 - `--timeout <seconds>` (default: 120)
 - `--preflight-timeout <seconds>` (default: 45)
 - `--fallback-export-on-timeout` (optional)
+- `--resume-from-export <path>` (optional)
 - routing/workspace options same as `exec`
 
 ### `rpflow call`

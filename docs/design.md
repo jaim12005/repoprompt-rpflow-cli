@@ -11,6 +11,7 @@
 - `rpflow.rpcli`: subprocess wrapper around `rp-cli`
 - `rpflow.state`: persistent last-good routing state
 - `rpflow.cli`: argparse command surface (exec/call/export/plan-export/autopilot/tools-schema/smoke)
+- structured command reports via `--report-json`
 
 ## Routing policy
 
@@ -35,7 +36,9 @@ Workspace switch:
 - `plan-export`: hard timeout on builder chain
 - `autopilot`: preflight timeout + plan/export timeout
 - optional fallback: export selection-only prompt when builder times out
+- optional resume path: reuse a prior known-good export (`--resume-from-export`)
 - timeout returns code `124` (not an uncaught exception)
+- stage classification distinguishes `builder_timeout` vs generic `timeout` vs signal kill
 
 ## Safety
 

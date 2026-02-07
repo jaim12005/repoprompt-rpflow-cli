@@ -16,6 +16,9 @@ class RunResult:
     code: int
     stdout: str
     stderr: str
+    timed_out: bool = False
+    signal: Optional[int] = None
+    classification: str = "ok"
 
 
 class RPCLI:
@@ -32,7 +35,22 @@ class RPCLI:
                 capture_output=True,
                 timeout=timeout,
             )
-            return RunResult(proc.returncode, proc.stdout, proc.stderr)
+            signal = None
+            classification = "ok"
+            if proc.returncode != 0:
+                if proc.returncode >= 128:
+                    signal = proc.returncode - 128
+                    classification = f"signal_{signal}"
+                else:
+                    classification = "error"
+            return RunResult(
+                code=proc.returncode,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                timed_out=False,
+                signal=signal,
+                classification=classification,
+            )
         except subprocess.TimeoutExpired as e:
             stdout = e.stdout or ""
             stderr = (e.stderr or "")
@@ -43,7 +61,14 @@ class RPCLI:
             if stderr and not stderr.endswith("\n"):
                 stderr += "\n"
             stderr += f"TIMEOUT: rp-cli exceeded {timeout}s"
-            return RunResult(124, stdout, stderr)
+            return RunResult(
+                code=124,
+                stdout=stdout,
+                stderr=stderr,
+                timed_out=True,
+                signal=None,
+                classification="timeout",
+            )
 
     def run_exec(
         self,
@@ -116,7 +141,7 @@ class RPCLI:
         window: Optional[int],
         tab: Optional[str],
         timeout: int = 60,
-    ) -> None:
+    ) -> RunResult:
         res = self.run_exec(
             f'workspace switch "{workspace}"',
             window=window,
@@ -126,9 +151,16 @@ class RPCLI:
         )
         merged = (res.stdout or "") + "\n" + (res.stderr or "")
         if res.code == 0:
-            return
+            return res
         if "already on workspace" in merged.lower():
-            return
+            return RunResult(
+                code=0,
+                stdout=res.stdout,
+                stderr=res.stderr,
+                timed_out=False,
+                signal=None,
+                classification="already_on_workspace",
+            )
         raise RPFlowError(merged.strip() or f"workspace switch failed ({res.code})")
 
 
