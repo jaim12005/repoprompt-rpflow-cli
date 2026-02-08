@@ -238,6 +238,22 @@ Options:
 - routing/workspace options same as `exec`
 - `--strict` available
 
+## Suggested AGENTS.md / MEMORY.md / TOOLS.md snippets
+
+If you use OpenClaw, these are the minimal rpflow-centric snippets to add in your workspace docs.
+
+AGENTS.md:
+- Use Repo Prompt via rpflow first for repo planning/reading/searching/editing work.
+- Before major automation, run: `PYTHONPATH=src python3 -m rpflow.cli smoke --workspace GitHub --tab T1 --profile fast --report-json /tmp/rpflow-smoke.json`.
+
+MEMORY.md:
+- Default repo profile: `--profile normal`; use `fast` for quick checks and `deep` for larger runs.
+- For builder flows prefer `--retry-on-timeout --fallback-export-on-timeout`; use `--report-json` and optional `--resume-from-export`.
+
+TOOLS.md:
+- Set `RP_PROFILE=normal` (or `fast`/`deep`) for wrapper defaults.
+- Keep a report triage helper: `skills/repoprompt/scripts/report-summary.sh /tmp/rpflow-*.json`.
+
 ## Troubleshooting
 
 - `rpflow error: rp-cli not found in PATH`
